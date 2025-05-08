@@ -1,0 +1,103 @@
+#!/usr/bin/php
+<?php
+require(__DIR__ . '/vendor/autoload.php');
+Dotenv\Dotenv::createUnsafeMutable(__DIR__)->safeLoad();
+
+$output_file_parsed = getenv('OUTPUT_FILE_PARSED');
+$output_file_404 = getenv('OUTPUT_FILE_404');
+$debug_level = intval(getenv('DEBUG_LEVEL') ?: 0);
+
+$hack_strings = [
+    // Suspicious and/or probing
+    'phpinfo', 'p\.php', 'credential',  'whoami', 'ls -la',
+
+    // Obvious hack strings
+    '`', '\\\\x[0-9a-f]{2}', '\\\\\d{2,3}', 'insert\s+into', '\';', '<\?', 'passwd', 'file_get', 'file_put', 'base64',
+    '\b\.ht', '\/etc\/', '\.\.\/', 'information_schema', 'cmdshell', 'dbms_pipe', '--', 'wget', 'curl', '\bunion\s+select',
+    '\bjoin\s*on', '$_GET', '$_POST', '$_REQUEST', '$_SESSION', '$_COOKIE', '$_SESSION',
+
+    // Xss attacks
+    'javascript:', '<\s*script', 'alert\s*\(', 'prompt\s*\(', 'eval\s*\(', 'document\.cookie', '<\s*iframe', '<\s*img',
+    'onclick', 'onmouse',
+
+    // Known Exploits
+    'gecko', 'jndi:', 'ldap:', 'alfa', 'cgiapi', '\w*shell\.php', 'indrajith',
+
+    // Configuration download attempts
+    '\.vscode', '\.\w*conf(?:ig)?', '\.idea',
+
+    // Possible access of RCE created files
+    '\bstyle\.php', 'root-terminal', 'filemanager', 'dir=',
+
+    // Honeypots
+    '\.php7\b', '\.sx?html?\b', '\.ini\b', '\.cgi\b', '\.jsp\b', '\.aspx?\b', '\.bat\b', '\.sh\b', '\.exe\b', '\.pl\b',
+    'joomla', 'magentoo', 'typo3', '\.aws',
+];
+$pattern = '/' . implode('|', $hack_strings) . '/i';
+
+if(!empty($argv) && in_array('--show-pattern', $argv)) {
+    echo "\nMatch Pattern:\n$pattern\n\n";
+    exit;
+}
+
+
+
+$outputHandlers = [
+    'parsed' => fopen($output_file_parsed, 'a'),
+    '404' => $output_file_404 ? fopen($output_file_404, 'a') : null
+];
+
+
+$stdin = fopen ('php://stdin', 'r');
+ob_implicit_flush(); // Use unbuffered output
+while ($line = fgets ($stdin))
+{
+    // Pass through raw line for debug level 1
+    doOutput($line,null,1);
+
+    preg_match('/(\[[^]]*]).*("[^"]*").*("[^"]*").*("[^"]*")/', $line,$matches);
+    array_shift($matches);
+    list($timestamp, $request, $referer, $ua) = array_map(function($v) { return trim($v, '[]"'); }, $matches);
+
+    $line = preg_replace('/\s\s+/', ' ', trim(str_replace($matches, '', $line)));
+
+    // Log crunched line data after extraction for debug level 2
+    doOutput($line, null, 2);
+
+    list($remote_ip, $http_user, $initial_code, $final_code, $bytes) = explode(' ', $line);
+
+    // URLDecode the request data for matching
+    $decoded = urldecode($request);
+
+    $output_data = "$final_code - $remote_ip [$timestamp] $decoded ($bytes bytes)";
+
+    // Force log all 404 for further review
+    if($outputHandlers['404']) {
+        doOutput($output_data, '404');
+    }
+
+    // Match the decoded request data against the compiled search pattern
+    if(preg_match($pattern, $decoded)) {
+        // Log matches to output location
+        doOutput($output_data);
+    }
+
+}
+
+
+function doOutput(string $content, ?string $target = null, int $level = 0): void
+{
+    global $debug_level;
+    global $outputHandlers;
+    $target = $target ?: 'parsed';
+    if($target == 'parsed' && $level <= $debug_level) {
+        if(is_resource($outputHandlers['parsed'])) {
+            fputs($outputHandlers['parsed'], trim($content) . "\n");
+        }
+    } elseif($target == '404' && $level <= $debug_level) {
+        if(is_resource($outputHandlers['404'])) {
+            fputs($outputHandlers['404'], trim($content) . "\n");
+        }
+    }
+}
+
